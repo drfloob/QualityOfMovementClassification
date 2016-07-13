@@ -1,6 +1,6 @@
 ---
 title: 'Not *How Much*, but *How Well*: Quality of Movement Analysis'
-author: "AJ Heller"
+author: "AJ Heller (aj@drfloob.com; [http://drfloob.com](http://drfloob.com))"
 date: "July 12, 2016"
 output: 
     html_document:
