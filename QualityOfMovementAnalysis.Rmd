@@ -1,0 +1,179 @@
+---
+title: 'Not *How Much*, but *How Well*: Quality of Movement Analysis'
+author: "AJ Heller"
+date: "July 12, 2016"
+output: html_document
+---
+
+```{r setupHidden, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE, 
+    cache = TRUE, 
+    fig.width = 10, 
+    fig.height = 6,
+    include=FALSE)
+```
+
+## Summary
+
+As my professors eloquently stated:
+
+> One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways.
+
+That goal is to build a model that can predict with high accuracy, from a single 1/40th of a second snapshot of those accelerometer measurements, which of the five different lift classifications that snapshot was measuring.
+
+
+## Choosing the Model
+
+This, being the final project in a machine learning course, is where I wanted to show off everything I learned and build a complex boosted ensemble of multiple classifiers. I resisted the urge, and decided instead to provide a parsimonious solution: the simplest solution that works well enough. "Well enough" in this context means correctly predicting the 20 unknown cases provided in the final quiz. For that reason, I chose to first evaluate a random forest model alone, with the intention of incrementally adding complexity to the model if the current model is not accurate enough. Further work, if necessary, will begin with gradient boosting and building an ensemble with the previous random forest model.
+
+
+## Data Exploration and Cleaning
+
+```{r setup}
+library(pacman)
+pacman::p_load(caret, ggplot2, rattle, dplyr, png, grid) 
+set.seed(42)
+```
+
+```{r downloadTraining}
+if (!file.exists("pml-training.csv")) {
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",
+                  destfile="pml-training.csv")
+}
+if (!file.exists("pml-testing.csv")) {
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",
+                  destfile="pml-testing.csv")
+}
+training <- read.csv("pml-training.csv", stringsAsFactors = FALSE)
+testing <- read.csv("pml-testing.csv", stringsAsFactors = FALSE)
+```
+
+```{r explore1_hidden}
+trdim <- dim(training)
+trmissing <- apply(training, 2, function(r) {mean(is.na(r) | r == "")})
+trmissing_pctna <- trmissing[which.max(trmissing)]
+trmissing_summaryRowIdxs <- which(!is.na(training$var_yaw_forearm))
+computed_names <- names(trmissing[trmissing > 0.5])
+```
+
+```{r summaryMeanSdByUserAndClasse, include=TRUE, echo=FALSE, fig.align='right', out.extra="align='right'", fig.width=4, fig.height=3}
+trsumdat <- training[trmissing_summaryRowIdxs,] %>% 
+    group_by(user_name, classe) %>% 
+    summarize(n=n())
+trsumdat_ms <- trsumdat %>% 
+    group_by(classe) %>% 
+    summarize(mean=mean(n), std=sd(n))
+qplot(classe, n, data=trsumdat, geom="boxplot", 
+      color=classe, 
+      xlab = "Movement Class", 
+      ylab="Number of Summary Observations", 
+      main = "Distribution of Observations by Class")
+```
+
+The training dataset contains `r trdim[1]` observations in `r trdim[2]` variables, but `r sum(trmissing > 0.5)` of those variables contain `r sprintf("%0.1f%%", trmissing_pctna*100)` missing values, leaving only `r length(trmissing_summaryRowIdxs)` observations that contain data for those variables. These observations are also the only observations in the training dataset where the `new_window` variable is `yes`; all others are `no`.
+
+To understand this, let's return to the [source of the data][Velloso] -- a study by Velloso et. al. -- to learn that they used a variable-width sliding window technique to generate features for their analysis, and for each time window, they calculated summary statistics (features) for the represented window of time. These same `r length(trmissing_summaryRowIdxs)` observations are the generated summary data.
+
+If I constrain the focus to the calculated summary data, what's left is a relatively tiny number of observations for each movement class (see box plot). If I wished to reproduce the analysis in Velloso et. al's paper, I would reproduce their feature selection process and fit multiple bagged random forest models.
+
+But the goal of this assignment is to predict the class of movement for a single observation, not a series of observations in a window of time. For that reason, this analysis will proceed by discarding the summary observations and cleaning up the remaining data.
+
+```{r trainingFilter}
+minus_computed_names <- sapply(
+    computed_names, 
+    function(x){paste0("-",x)}, 
+    USE.NAMES = FALSE)
+trfiltered <- select(training, -X, -new_window, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp) %>% 
+    select_(.dots=minus_computed_names) %>%
+    apply(2, function(c) { c[c=="#DIV/0!"] <- 99999; c}) %>% 
+    as.data.frame(stringsAsFactors=FALSE)
+trfiltered$classe <- factor(trfiltered$classe)
+trfiltered$user_name <- factor(trfiltered$user_name)
+numCols <- setdiff(names(trfiltered), c("user_name", "classe"))
+trfiltered[numCols] <- sapply(trfiltered[numCols], as.numeric)
+```
+
+For the final cleanup step, division-by-zero errors in the dataset are converted into 99999 values, which on the scale of the data, are effectively infinite values.
+
+## Random Forest
+
+[From the creators of Random Forest, Breiman and Cutler][BC_oob]:
+
+> In random forests, there is no need for cross-validation or a separate test set to get an unbiased estimate of the test set error. It is estimated internally, during the run ...
+
+This property of random forests allows us to forego cross-validation and use more data to build a more accurate model. The 20 samples from the testing set will still be held out as the validation set, and the quiz results will be used to gauge the model's success. After filtering out the summary observations and unnecessary variables, and correcting for "division by zero" errors in numeric fields, I traced the random forest training process for a few iterations and found it only needed a fairly small number of trees to get some amazing results (in much less time). I then generated the following model:
+
+```{r modrf, include=TRUE, message=FALSE, results="hide"}
+modrf <- train(y=trfiltered$classe, 
+               x=subset(trfiltered, select=-classe), 
+               method="rf",
+               verbose=TRUE,
+               ntree=30,
+               do.trace = TRUE,
+               trControl=trainControl(verboseIter=TRUE)
+               )
+```
+```{r modrf_print, include=TRUE, collapse=TRUE}
+modrf$finalModel
+```
+
+```{r modrf_desc_data}
+oob <- mean(predict(modrf$finalModel) != trfiltered$classe) 
+```
+
+## Model Details
+
+With an out-of-sample error rate of `r sprintf("%0.2f%%", oob*100)`, the accuracy of this model is certainly sufficient for this project (and likely for most practical use, too!). No further model alterations should be necessary. The `ntree` number above was chosen to balance accuracy vs training time; `ntree=25` gave a `0.35%` out-of-sample error rate, which would likely also work fine. The `verbose` lines above print out a bit more information for each iteration of the training process, and `do.trace` allows you to see the out-of-bag accuracy for each tree in each iteration of the process, which helped me realize I could generate far fewer than 500 trees (the default) on each iteration, saving a lot of compute time.
+
+Variable importance may be enlightening. Maybe we'll see if any particular measurements stand out as particularly indicative of good or bad movements.
+
+```{r varimp, include=TRUE}
+varImp(modrf$finalModel) %>% mutate(names = row.names(.)) %>% arrange(desc(Overall)) %>% head(10)
+```
+
+Oddly, the ever-increasing `num_window` variable is the most important value for predicting movement type. This implies that movement types correlate with the time of data collection. I'd be interested to rebuild this model without that variable, its inclusion was actually an oversight. But the model performs well (see below), so I'd rather not change it now.
+
+Interestingly, the rest of the measurements are mainly positional: x, y, z, pitch, roll, and yaw. Only one measurement deals with acceleration. And all 9 of the top 9 *actual* measurements are from just the belt, forearm, and bumbbell. 
+
+It's possible that fewer, less-complex measurement devices could be used to provide the same quality of movement class prediction. The implication is cheap, effective movement coaching!
+
+
+## Validation
+
+To run this model on the testing data, it must be cleaned in the same way the training data was cleaned -- save any modifications of the `classe` variable, which doesn't exist in the testing set.
+
+```{r clean_testing_data}
+testfiltered <- select(testing, -X, -new_window, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp) %>% 
+    select_(.dots=minus_computed_names) %>%
+    apply(2, function(c) { c[c=="#DIV/0!"] <- 99999; c}) %>% 
+    as.data.frame(stringsAsFactors=FALSE)
+testfiltered$user_name <- factor(testfiltered$user_name)
+testfiltered[numCols] <- sapply(testfiltered[numCols], as.numeric)
+```
+
+All that's left is to predict the movement classes for these 20 new records
+
+```{r predict_testing, include=TRUE}
+predict(modrf$finalModel, testfiltered)
+```
+
+So how does this model fare?
+
+```{r testResults, include=TRUE, echo=FALSE, fig.width=5, fig.height=3, fig.align='center', fig.cap="[Course Project Prediction Quiz: 20/20. Quiz Passed!]"}
+img <- readPNG("./quizResults.png")
+grid.raster(img)
+```
+
+Well enough! This project has been the most exciting yet, and I'm interested to see if anyone has yet capitalized on the personal-training possibilities of this technology. I'd love to try it myself :-).
+
+## References
+
+Breiman, L.; Cutler, A. [Random Forests][BC]. 2001. Retrieved July 13, 2016, from [http://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm][BC]
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. [Qualitative Activity Recognition of Weight Lifting Exercises][Velloso]. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+
+[Velloso]: http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201
+[BC]: http://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm
+[BC_oob]: http://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#ooberr
