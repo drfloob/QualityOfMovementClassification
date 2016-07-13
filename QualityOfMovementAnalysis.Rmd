@@ -18,6 +18,8 @@ knitr::opts_chunk$set(
     include=FALSE)
 ```
 
+*View the source for this report, and all the model-building code, [here][SOURCE].*
+
 ## Summary
 
 As my professors eloquently stated:
@@ -181,3 +183,4 @@ Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. [Qualitative Acti
 [Velloso]: http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201
 [BC]: http://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm
 [BC_oob]: http://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#ooberr
+[SOURCE]: https://github.com/drfloob/QualityOfMovementClassification
